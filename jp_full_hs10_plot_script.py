@@ -2,41 +2,46 @@
 # -*- coding: utf-8 -*-
 
 """
-JP Export Visualization Pipeline (HS10 = 8806)
-Exact structural replica of TW full_hs10_plot_script_v2.py,
-rewritten for Japan.
+JP Full Trade Visualization Pipeline (EXPORT + IMPORT)
+------------------------------------------------------
 
-Outputs:
-    JP_cleaned_export_by_hs10.csv
-    All JP_* prefixed PNGs from jp_plot_01_to_02 and jp_plot_03_to_06.
+Updated to match jp_pull_and_run_trade_pipeline.py:
+- Reads combined import + export dataset
+- Splits into EXPORT and IMPORT
+- Applies HS10 → (US_Group, NATO_Class, MTOW) mapping
+- Translates JP country names → English
+- Creates qtr and period variables (TW-style)
+- Saves:
+      JP_cleaned_export_by_hs10.csv
+      JP_cleaned_import_by_hs10.csv
+- Runs all plots using jp_plot_01_to_02 and jp_plot_03_to_06
+
+This is the synchronized counterpart of TW full_hs10_plot_script_v2.
 """
 
 import pandas as pd
 import numpy as np
-import re
 from pathlib import Path
 import subprocess
-import datetime as _dt
-import calendar as _cal
 
 # ================================================================
-# 0. JP Export Directory (as requested by user)
+# 0. Directories (same as pipeline)
 # ================================================================
-EXPORT_DIR = Path(
+BASE_DIR = Path(
     "~/Library/Mobile Documents/com~apple~CloudDocs/github/drone-export-jp"
 ).expanduser()
-EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
-JP_RAW = EXPORT_DIR / "jp_8806_by_country_month_2023_2025.csv"
+INPUT_FILE = BASE_DIR / "jp_trade_export_import_8806_monthly.csv"
 
-ENCODING = "utf-8-sig"
+OUT_EXPORT = BASE_DIR / "JP_cleaned_export_by_hs10.csv"
+OUT_IMPORT = BASE_DIR / "JP_cleaned_import_by_hs10.csv"
+
+ENC = "utf-8-sig"
 
 # ================================================================
-# 1. JP HS10 → Group, Class, MTOW Mapping
-# Mirrors the TW structure (tuple of 3 fields)
+# 1. HS10 → (US_Group, NATO_Class, MTOW)
+#    Exactly the same as your updated jp_pull_and_run_trade_pipeline
 # ================================================================
-
-# JP-specific mapping (user may update depending on Japan's category logic)
 hs10_group_class_map_jp = {
     "8806.10.00.00": ("Group 5", "Class III", "Passenger UAV"),
     "8806.21.00.00": ("Group 1", "Class I", "≤250g"),
@@ -51,11 +56,11 @@ hs10_group_class_map_jp = {
     "8806.99.00.00": ("Group 4/5", "Class III", ">150kg"),
 }
 
-def map_hs10_to_group_tuple(hs):
+def map_hs10_to_tuple(hs):
     return hs10_group_class_map_jp.get(hs, (None, None, None))
 
 # ================================================================
-# 2. Japanese → English Country Translation (mirrors TW structure)
+# 2. JP → English Country Name mapping
 # ================================================================
 jp_country_map = {
     "大韓民国": "South Korea",
@@ -89,64 +94,83 @@ jp_country_map = {
     "アルゼンチン": "Argentina",
     "南アフリカ共和国": "South Africa",
     "ザンビア": "Zambia",
-    "サウジアラビア": "Saudi Arabia"
+    "サウジアラビア": "Saudi Arabia",
+    "東ティモール": "Timor-Leste",
+    "イスラエル": "Israel",
+    "ノルウェー": "Norway",
+    "ベルギー": "Belgium",
+    "ハンガリー": "Hungary",
+    "ラトビア": "Latvia",
+    "スロベニア": "Slovenia",
+    "コモロ": "Comoros",
+    "デンマーク": "Denmark",
+    "ギリシャ": "Greece",
+    "トルコ": "Türkiye",
+    "チェコ": "Czechia",
+    "メキシコ": "Mexico",
+    "スウェーデン": "Sweden",
+    "リトアニア": "Lithuania",
+    "エクアドル": "Ecuador",
+    "中華人民共和国": "PRC"
 }
 
-def translate_country_jp(x):
+def translate_jp_country(x):
     return jp_country_map.get(x, x)
 
 # ================================================================
-# 3. Convert "yyyymm" into quarters like TW qtr function
+# 3. Quarter + Period conversion
 # ================================================================
 def yyyymm_to_qtr(yyyymm):
-    year = int(str(yyyymm)[:4])
-    month = int(str(yyyymm)[4:6])
-    q = (month - 1) // 3 + 1
-    return f"{year} Q{q}"
+    y = int(str(yyyymm)[:4])
+    m = int(str(yyyymm)[4:6])
+    q = (m - 1)//3 + 1
+    return f"{y} Q{q}"
 
-# ================================================================
-# 4. Load JP dataset
-# ================================================================
-df = pd.read_csv(JP_RAW, encoding=ENCODING)
-
-# Extract Japanese country name (format: "103_大韓民国")
-df["country_jp"] = df["area_name"].apply(lambda x: x.split("_", 1)[1])
-df["country"] = df["country_jp"].apply(translate_country_jp)
-
-# Create qtr and period
-df["yyyymm"] = df["yyyymm"].astype(str)
-df["qtr"] = df["yyyymm"].apply(yyyymm_to_qtr)
-
-# Period (H1/H2) for 2023–2025 (mirror TW structure)
 def qtr_to_period(q):
-    if "2023" in q:
-        return "2023 H1" if q in ("2023 Q1", "2023 Q2") else "2023 H2"
-    if "2024" in q:
-        return "2024 H1" if q in ("2024 Q1", "2024 Q2") else "2024 H2"
-    if "2025" in q:
-        return "2025 H1" if q in ("2025 Q1", "2025 Q2") else "2025 H2"
-    return None
+    y = q.split()[0]
+    if q.endswith("Q1") or q.endswith("Q2"):
+        return f"{y} H1"
+    return f"{y} H2"
 
+# ================================================================
+# 4. Load combined dataset
+# ================================================================
+print(f"📂 Loading combined JP trade data from: {INPUT_FILE}")
+df = pd.read_csv(INPUT_FILE, dtype=str)
+
+# Convert types
+df["yyyymm"] = df["yyyymm"].astype(str)
+df["NO"] = pd.to_numeric(df["NO"], errors="coerce")
+df["Yen_thousand"] = pd.to_numeric(df["Yen_thousand"], errors="coerce")
+
+# ================================================================
+# 5. Extract country (JP → English)
+# ================================================================
+df["country_jp"] = df["area_name"].apply(lambda x: x.split("_",1)[1])
+df["country"] = df["country_jp"].apply(translate_jp_country)
+
+# ================================================================
+# 6. Period variables
+# ================================================================
+df["qtr"] = df["yyyymm"].apply(yyyymm_to_qtr)
 df["period"] = df["qtr"].apply(qtr_to_period)
 
 # ================================================================
-# 5. Create classification columns: US_Group, NATO_Class, MTOW
+# 7. HS10 classifications
 # ================================================================
 df[["US_Group", "NATO_Class", "MTOW"]] = df["hs10"].apply(
-    lambda hs: pd.Series(map_hs10_to_group_tuple(hs))
+    lambda x: pd.Series(map_hs10_to_tuple(x))
 )
 
-# Re-export flag (Japan dataset has no explicit flag → set False)
+# Japan has no re-export flag
 df["is_reexport"] = False
 
-# ================================================================
-# 6. Quantity & Value (mirror TW "Quanity" and "K JPY")
-# ================================================================
-df["Quanity"] = pd.to_numeric(df["NO"], errors="coerce")
-df["K JPY"] = pd.to_numeric(df["Yen_thousand"], errors="coerce")
+# Mirror TW naming style
+df["Quanity"] = df["NO"]
+df["K JPY"] = df["Yen_thousand"]
 
 # ================================================================
-# 7. Final output columns (match TW EXACTLY)
+# 8. Select final output columns (mirror TW exactly)
 # ================================================================
 final_cols = [
     "qtr", "period", "country", "hs10",
@@ -155,37 +179,40 @@ final_cols = [
     "is_reexport"
 ]
 
-df_final = df[final_cols]
+# ================================================================
+# 9. Split EXPORT + IMPORT
+# ================================================================
+df_export = df[df["flow"] == "EXPORT"][final_cols].copy()
+df_import = df[df["flow"] == "IMPORT"][final_cols].copy()
+
+print(f"EXPORT rows: {len(df_export)}")
+print(f"IMPORT rows: {len(df_import)}")
 
 # ================================================================
-# 8. Save as JP_cleaned_export_by_hs10.csv
+# 10. Save cleaned files
 # ================================================================
-OUT_CLEAN = EXPORT_DIR / "JP_cleaned_export_by_hs10.csv"
-df_final.to_csv(OUT_CLEAN, index=False, encoding="utf-8-sig")
-print(f"✅ JP_cleaned_export_by_hs10.csv created at {OUT_CLEAN}")
+df_export.to_csv(OUT_EXPORT, index=False, encoding=ENC)
+df_import.to_csv(OUT_IMPORT, index=False, encoding=ENC)
+
+print(f"💾 Saved: {OUT_EXPORT}")
+print(f"💾 Saved: {OUT_IMPORT}")
 
 # ================================================================
-# 9. Run JP plot scripts (mirroring TW subprocess calls)
+# 11. Run JP plot scripts (TW-style subprocess)
 # ================================================================
-from jp_plot_01_to_02 import run_plot_01_02
-from jp_plot_03_to_06 import run_plot_03_04, run_plot_05_06
+def run_plot(script, flow):
+    cmd = ["python", str(BASE_DIR / script), flow]
+    print("▶ Running:", " ".join(cmd))
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    print(r.stdout)
+    print(r.stderr)
 
-# === HS10 category ===
-run_plot_01_02("hs10")
-run_plot_03_04("hs10")
-run_plot_05_06("hs10")
-print("✅ HS10 plots done")
+print("\n===== GENERATING EXPORT PLOTS =====")
+run_plot("jp_plot_01_to_02.py", "EXPORT")
+run_plot("jp_plot_03_to_06.py", "EXPORT")
 
-# === US_Group category ===
-run_plot_01_02("US_Group")
-run_plot_03_04("US_Group")
-run_plot_05_06("US_Group")
-print("✅ US_Group plots done")
+print("\n===== GENERATING IMPORT PLOTS =====")
+run_plot("jp_plot_01_to_02.py", "IMPORT")
+run_plot("jp_plot_03_to_06.py", "IMPORT")
 
-# === NATO_Class category ===
-run_plot_01_02("NATO_Class")
-run_plot_03_04("NATO_Class")
-run_plot_05_06("NATO_Class")
-print("✅ NATO_Class plots done")
-
-print("🎉 ALL JP PLOTS COMPLETED")
+print("\n🎉 ALL JP PLOTS COMPLETED SUCCESSFULLY")
